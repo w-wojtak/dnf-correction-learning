@@ -6,9 +6,19 @@ import os
 from utils import *
 
 
+# Project root = current working directory
+PROJECT_ROOT = Path.cwd()
+
+# Results directory
+results_dir = PROJECT_ROOT / "results_learning"
+results_dir.mkdir(exist_ok=True)
+
+
 # ====================================
 # --------- Parameters ---------------
 # ====================================
+
+
 
 
 plot_fields = True
@@ -161,14 +171,14 @@ print(f"Max of u_d: {max(u_d)}")
 # ====================================
 
 # Create data folder if it doesn't exist
-os.makedirs("/home/wwojtak/dnf_architecture_python/data_basic", exist_ok=True)
+# os.makedirs("//home/wwojtak/dnf_architecture_python/data_basic", exist_ok=True)
 
 # Get current date and time
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-# # Define file paths
-file_path_1 = f"/home/wwojtak/dnf_architecture_python/data_basic/u_field_1_{timestamp}.npy"
-file_path_2 = f"/home/wwojtak/dnf_architecture_python/data_basic/u_d_{timestamp}.npy"
+# File paths
+file_path_1 = results_dir / f"u_field_1_{timestamp}.npy"
+file_path_2 = results_dir / f"u_d_{timestamp}.npy"
 
 # Save final field states
 np.save(file_path_1, u_field_1)
