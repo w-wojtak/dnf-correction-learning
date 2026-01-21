@@ -105,7 +105,8 @@ t = np.arange(0, t_lim + dt, dt)
 # plt.tight_layout()
 # plt.show()
 
-folder = "/home/wwojtak/dnf_architecture_python/data_basic"
+# folder = "/home/wwojtak/dnf_architecture_python/data_basic"
+folder = PROJECT_ROOT / "results_learning"
 
 file1, ts1 = find_latest_file_with_prefix(folder, "u_field_1_")
 # file2, ts2 = find_latest_file_with_prefix(folder, "u_field_2_")
@@ -188,7 +189,8 @@ try:
     else:
         # TODO: save and load last memory PLUS h_amem
         # now it's loading original memory so the timng is wrong
-        data_dir = "/home/wwojtak/dnf_architecture_python/data_basic"
+        # data_dir = "/home/wwojtak/dnf_architecture_python/data_basic"
+        data_dir = folder
         print(f"Loading h_amem from {data_dir}")
 
         latest_h_amem_file, _ = find_latest_file_with_prefix(
