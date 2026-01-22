@@ -95,12 +95,19 @@ class MemoryEditor:
         return u_new
 
     def _make_earlier(self, u):
-        # shift memory slightly left
-        return np.roll(u, -2)
+        # shift memory slightly left REMOVE SHIFTING
+        #  to make earlier: increase the peak
+        #  action's mask (TODO) x f(u_act) -> to increase only the right peak
+        #  BUT, how to know which action to edit????? - in annotation we have time step
+        # somehow map time intervals to space intervals???
+        # and how to decide which one to edit based on when user speaks. the current or past?
+
+        return np.roll(u, -20)
 
     def _make_later(self, u):
-        # shift memory slightly right
-        return np.roll(u, 2)
+        # shift memory slightly righ
+        #  as above but in opposite direction
+        return np.roll(u, 20)
 
     def _remove_peak(self, u, t_idx, history):
         # remove peak active at annotated time
@@ -110,7 +117,7 @@ class MemoryEditor:
         return u
 
 
-
+# TODO: edit actions!!!!!!
 
 
 # ====================================
