@@ -10,6 +10,11 @@ from utils import *
 from pathlib import Path
 import sys
 
+# RUN ALL THE FIELDS BUT ONLY DISPLAY THE BASIC FIELDS??
+# SO WE CAN SHOW MORE FIELDS IF NEEDED
+
+# HERE I'D RUN ONLY 1ST TRIAL AS "BASIC RECALL"
+
 # Project root = current working directory
 PROJECT_ROOT = Path.cwd()
 
