@@ -242,7 +242,7 @@ h_u_amem = np.zeros(np.shape(x))
 # -------- Online plotting -----------
 # ====================================
 
-plot_fields = True
+plot_fields = False
 plot_every = 5      # update plot every x time steps
 plot_delay = 0.05   # delay (in seconds) before each plot update
 
@@ -387,3 +387,39 @@ if annotations:
     print(f"Updated memory saved to: {memory_path}")
 else:
     print("No feedback annotations collected")
+
+
+
+
+# ====================================
+# -------- Memory comparison plot ----
+# ====================================
+
+plt.ioff()  # turn off interactive mode
+
+fig, ax = plt.subplots(figsize=(10, 4))
+
+ax.plot(
+    x,
+    u_act_initial,
+    label="Initial u_act (before correction)",
+    linestyle="--",
+    linewidth=2,
+)
+
+ax.plot(
+    x,
+    u_act_updated,
+    label="Updated u_act (after correction)",
+    linestyle="-",
+    linewidth=2,
+)
+
+ax.set_xlabel("x")
+ax.set_ylabel("Activity")
+ax.set_title("Action memory: before vs after correction")
+ax.legend()
+ax.grid(True)
+
+plt.tight_layout()
+plt.show()
