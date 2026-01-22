@@ -24,6 +24,94 @@ from utils import *
 # SKIP/REMOVE
 # ADD
 
+# ====================================
+# -------- Human feedback ------------
+# ====================================
+
+from enum import Enum
+from dataclasses import dataclass
+
+
+class FeedbackType(Enum):
+    EARLY = "early"
+    LATE = "late"
+    BEFORE = "before"
+    AFTER = "after"
+    SKIP = "skip"
+    ADD = "add"
+
+
+@dataclass
+class Annotation:
+    time_index: int
+    feedback: FeedbackType
+
+
+class AnnotationBuffer:
+    """
+    Passive buffer: stores human feedback during execution.
+    Does NOT affect dynamics.
+    """
+    def __init__(self):
+        self.annotations = []
+
+    def add(self, annotation: Annotation):
+        self.annotations.append(annotation)
+
+    def get_all(self):
+        return self.annotations
+
+
+# ====================================
+# -------- Memory editor -------------
+# ====================================
+
+class MemoryEditor:
+    """
+    Applies human feedback AFTER the run
+    to modify initial u_act memory.
+    """
+
+    def __init__(self, x):
+        self.x = x
+
+    def apply_feedback(self, u_act_initial, u_act_history, annotations):
+        u_new = u_act_initial.copy()
+
+        for ann in annotations:
+            if ann.feedback == FeedbackType.LATE:
+                u_new = self._make_later(u_new)
+
+            elif ann.feedback == FeedbackType.EARLY:
+                u_new = self._make_earlier(u_new)
+
+            elif ann.feedback == FeedbackType.SKIP:
+                u_new = self._remove_peak(
+                    u_new,
+                    ann.time_index,
+                    u_act_history
+                )
+
+        return u_new
+
+    def _make_earlier(self, u):
+        # shift memory slightly left
+        return np.roll(u, -2)
+
+    def _make_later(self, u):
+        # shift memory slightly right
+        return np.roll(u, 2)
+
+    def _remove_peak(self, u, t_idx, history):
+        # remove peak active at annotated time
+        snapshot = history[t_idx]
+        peak_pos = np.argmax(snapshot)
+        u[peak_pos - 3 : peak_pos + 3] = -5.0
+        return u
+
+
+
+
 
 # ====================================
 # -------- Project paths -------------
@@ -184,6 +272,18 @@ if plot_fields:
     plt.tight_layout()
 
 
+
+# ====================================
+# -------- Feedback buffer -----------
+# ====================================
+
+annotation_buffer = AnnotationBuffer()
+
+# Keep a copy of initial memory for learning
+u_act_initial = u_act.copy()
+
+
+
 # ====================================
 # -------- Recall simulation ---------
 # ====================================
@@ -234,7 +334,7 @@ for i in range(len(t)):
     u_wm_values_at_positions = [u_wm[idx] for idx in input_indices]
     u_wm_history.append(u_wm_values_at_positions)
 
-        # ------------------------------------
+    # ------------------------------------
     # Online plot update
     # ------------------------------------
     if plot_fields and (i % plot_every == 0 or i == len(t) - 1):
@@ -247,3 +347,43 @@ for i in range(len(t)):
 
         plt.pause(plot_delay)
 
+    # ------------------------------------
+    # Passive feedback collection (FAKE)
+    # ------------------------------------
+    # Later: replaced by ROS speech callback
+    if i == 250:
+        annotation_buffer.add(
+            Annotation(
+                time_index=i,
+                feedback=FeedbackType.LATE
+            )
+        )
+
+
+
+
+
+# ====================================
+# -------- Post-run learning ---------
+# ====================================
+
+annotations = annotation_buffer.get_all()
+
+if annotations:
+    print(f"Applying {len(annotations)} feedback annotations")
+
+    editor = MemoryEditor(x)
+    u_act_updated = editor.apply_feedback(
+        u_act_initial=u_act_initial,
+        u_act_history=u_act_history,
+        annotations=annotations
+    )
+
+    # Save updated memory for next run
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    memory_path = results_dir / f"u_act_memory_updated_{timestamp}.npy"
+    np.save(memory_path, u_act_updated)
+
+    print(f"Updated memory saved to: {memory_path}")
+else:
+    print("No feedback annotations collected")
