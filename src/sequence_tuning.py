@@ -25,135 +25,6 @@ from utils import *
 # ADD
 
 # ====================================
-# -------- Human feedback ------------
-# ====================================
-
-from enum import Enum
-from dataclasses import dataclass
-
-
-class FeedbackType(Enum):
-    EARLY = "early"
-    LATE = "late"
-    BEFORE = "before"
-    AFTER = "after"
-    SKIP = "skip"
-    ADD = "add"
-
-
-@dataclass
-class Annotation:
-    time_index: int
-    feedback: FeedbackType
-
-
-class AnnotationBuffer:
-    """
-    Passive buffer: stores human feedback during execution.
-    Does NOT affect dynamics.
-    """
-    def __init__(self):
-        self.annotations = []
-
-    def add(self, annotation: Annotation):
-        self.annotations.append(annotation)
-
-    def get_all(self):
-        return self.annotations
-
-
-# ====================================
-# -------- Memory editor -------------
-# ====================================
-
-class MemoryEditor:
-    """
-    Applies human feedback AFTER the run
-    to modify initial u_act memory.
-    """
-
-    def __init__(self, x):
-        self.x = x
-
-    def apply_feedback(self, u_act_initial, u_act_history, annotations):
-        u_new = u_act_initial.copy()
-
-        for ann in annotations:
-            if ann.feedback == FeedbackType.LATE:
-                u_new = self._make_later(u_new)
-
-            elif ann.feedback == FeedbackType.EARLY:
-                u_new = self._make_earlier(u_new)
-
-            elif ann.feedback == FeedbackType.SKIP:
-                u_new = self._remove_peak(
-                    u_new,
-                    ann.time_index,
-                    u_act_history
-                )
-
-        return u_new
-
-    def _make_earlier(self, u):
-        # shift memory slightly left REMOVE SHIFTING
-        #  to make earlier: increase the peak
-        #  action's mask (TODO) x f(u_act) -> to increase only the right peak
-        #  BUT, how to know which action to edit????? - in annotation we have time step
-        # somehow map time intervals to space intervals???
-        # and how to decide which one to edit based on when user speaks. the current or past?
-
-        return np.roll(u, -20)
-
-    def _make_later(self, u):
-        # shift memory slightly righ
-        #  as above but in opposite direction
-        return np.roll(u, 20)
-
-    def _remove_peak(self, u, t_idx, history):
-        # remove peak active at annotated time
-        snapshot = history[t_idx]
-        peak_pos = np.argmax(snapshot)
-        u[peak_pos - 3 : peak_pos + 3] = -5.0
-        return u
-
-
-# TODO: edit actions!!!!!!
-
-
-# ====================================
-# -------- Project paths -------------
-# ====================================
-
-# Project root = current working directory
-PROJECT_ROOT = Path.cwd()
-
-# Results directory
-results_dir = PROJECT_ROOT / "results_tuning"
-results_dir.mkdir(exist_ok=True)
-
-
-# ====================================
-# -------- Load memory ---------------
-# ====================================
-
-# folder = "/home/wwojtak/dnf_architecture_python/data_basic"
-folder = PROJECT_ROOT / "results_learning"
-
-file1, ts1 = find_latest_file_with_prefix(folder, "u_field_1_")
-# file2, ts2 = find_latest_file_with_prefix(folder, "u_field_2_")
-file3, ts3 = find_latest_file_with_prefix(folder, "u_d_")
-
-# Optional: check if all timestamps match
-if ts1 != ts3:
-    raise ValueError("Timestamps do not match across all files.")
-
-# Load data
-u_field_1 = np.load(file1)
-# u_field_2 = np.load(file2)
-u_d = np.load(file3)
-
-
-# ====================================
 # -------- Initialization ------------
 # ====================================
 
@@ -203,6 +74,194 @@ action_colors = [
     "tab:red",
     "tab:purple",
 ]
+
+
+
+# ====================================
+# -------- Human feedback ------------
+# ====================================
+
+from enum import Enum
+from dataclasses import dataclass
+
+
+class FeedbackType(Enum):
+    EARLY = "early"
+    LATE = "late"
+    BEFORE = "before"
+    AFTER = "after"
+    SKIP = "skip"
+    ADD = "add"
+
+
+@dataclass
+class Annotation:
+    time_index: int
+    feedback: FeedbackType
+
+
+class AnnotationBuffer:
+    """
+    Passive buffer: stores human feedback during execution.
+    Does NOT affect dynamics.
+    """
+    def __init__(self):
+        self.annotations = []
+
+    def add(self, annotation: Annotation):
+        self.annotations.append(annotation)
+
+    def get_all(self):
+        return self.annotations
+
+
+# ====================================
+# -------- Memory editor -------------
+# ====================================
+
+
+
+class MemoryEditor:
+    """
+    Applies human feedback AFTER the run
+    to modify initial u_act memory.
+    """
+
+    def __init__(self, x, action_centers):
+        self.x = x
+        self.action_centers = np.array(action_centers)
+
+        # Precompute spatial buckets ONCE
+        self.action_bounds = self._compute_action_bounds(
+            self.x,
+            self.action_centers
+        )
+
+    def apply_feedback(self, u_act_initial, u_act_history, annotations):
+        u_new = u_act_initial.copy()
+
+        for ann in annotations:
+            if ann.feedback == FeedbackType.LATE:
+                u_new = self._make_later(u_new, ann, u_act_history)
+
+            elif ann.feedback == FeedbackType.EARLY:
+                u_new = self._make_earlier(u_new)
+
+            elif ann.feedback == FeedbackType.SKIP:
+                u_new = self._remove_peak(
+                    u_new,
+                    ann.time_index,
+                    u_act_history
+                )
+
+        return u_new
+
+    def _make_earlier(self, u):
+        # shift memory slightly left REMOVE SHIFTING
+        #  to make earlier: increase the peak
+        #  action's mask (TODO) x f(u_act) -> to increase only the right peak
+        #  BUT, how to know which action to edit????? - in annotation we have time step
+        # somehow map time intervals to space intervals???
+        # and how to decide which one to edit based on when user speaks. the current or past?
+
+        return np.roll(u, -20)
+    
+    def _action_index_from_time(self, time_index, u_act_history):
+        """
+        Return which action bucket was active at this time.
+        """
+        values = u_act_history[time_index]  # shape: (num_actions,)
+        return int(np.argmax(values))
+    
+    def _compute_action_bounds(self, x, centers):
+        """
+        Compute spatial index ranges for each action bucket.
+        """
+        bounds = []
+        midpoints = (centers[:-1] + centers[1:]) / 2
+
+        left_edges = np.concatenate(([x[0]], midpoints))
+        right_edges = np.concatenate((midpoints, [x[-1]]))
+
+        for l, r in zip(left_edges, right_edges):
+            idx = np.where((x >= l) & (x < r))[0]
+            bounds.append(idx)
+
+        return bounds
+    
+    def _make_later_action(self, u, action_idx, factor=0.8):
+        """
+        LATE feedback → decrease amplitude of the selected action peak.
+        """
+        u_new = u.copy()
+
+        idx = self.action_bounds[action_idx]
+
+        # Reduce amplitude locally
+        u_new[idx] *= factor
+
+        return u_new
+
+
+
+    # def _make_later(self, u):
+    #     # shift memory slightly righ
+    #     #  as above but in opposite direction
+    #     return np.roll(u, 20)
+
+    def _make_later(self, u, ann, u_act_history):
+        action_idx = self._action_index_from_time(
+            ann.time_index, u_act_history
+        )
+        return self._make_later_action(u, action_idx)
+
+
+
+    def _remove_peak(self, u, t_idx, history):
+        # remove peak active at annotated time
+        snapshot = history[t_idx]
+        peak_pos = np.argmax(snapshot)
+        u[peak_pos - 3 : peak_pos + 3] = -5.0
+        return u
+
+
+# TODO: edit actions!!!!!!
+
+
+# ====================================
+# -------- Project paths -------------
+# ====================================
+
+# Project root = current working directory
+PROJECT_ROOT = Path.cwd()
+
+# Results directory
+results_dir = PROJECT_ROOT / "results_tuning"
+results_dir.mkdir(exist_ok=True)
+
+
+# ====================================
+# -------- Load memory ---------------
+# ====================================
+
+# folder = "/home/wwojtak/dnf_architecture_python/data_basic"
+folder = PROJECT_ROOT / "results_learning"
+
+file1, ts1 = find_latest_file_with_prefix(folder, "u_field_1_")
+# file2, ts2 = find_latest_file_with_prefix(folder, "u_field_2_")
+file3, ts3 = find_latest_file_with_prefix(folder, "u_d_")
+
+# Optional: check if all timestamps match
+if ts1 != ts3:
+    raise ValueError("Timestamps do not match across all files.")
+
+# Load data
+u_field_1 = np.load(file1)
+# u_field_2 = np.load(file2)
+u_d = np.load(file3)
+
+
+
 
 
 
@@ -410,7 +469,7 @@ annotations = annotation_buffer.get_all()
 if annotations:
     print(f"Applying {len(annotations)} feedback annotations")
 
-    editor = MemoryEditor(x)
+    editor = MemoryEditor(x, input_positions)
     u_act_updated = editor.apply_feedback(
         u_act_initial=u_act_initial,
         u_act_history=u_act_history,
