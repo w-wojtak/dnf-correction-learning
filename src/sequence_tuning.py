@@ -173,6 +173,37 @@ input_positions = input_position_1
 input_indices = [np.argmin(np.abs(x - pos)) for pos in input_positions]
 
 
+input_positions2 = np.array(input_positions)
+
+# Midpoints between action centers
+boundaries = (input_positions2[:-1] + input_positions2[1:]) / 2
+
+# Add outer boundaries to cover full field
+boundaries = np.concatenate((
+    [x[0]],
+    boundaries,
+    [x[-1]]
+))
+
+
+action_buckets = []
+
+for i in range(len(input_positions)):
+    left = boundaries[i]
+    right = boundaries[i + 1]
+
+    idx = np.where((x >= left) & (x < right))[0]
+    action_buckets.append(idx)
+
+
+action_colors = [
+    "tab:blue",
+    "tab:orange",
+    "tab:green",
+    "tab:red",
+    "tab:purple",
+]
+
 
 
 
@@ -402,31 +433,48 @@ else:
 # -------- Memory comparison plot ----
 # ====================================
 
-plt.ioff()  # turn off interactive mode
+plt.ioff()
 
 fig, ax = plt.subplots(figsize=(10, 4))
 
-ax.plot(
-    x,
-    u_act_initial,
-    label="Initial u_act (before correction)",
-    linestyle="--",
-    linewidth=2,
-)
+for bucket_idx, color in zip(action_buckets, action_colors):
 
-ax.plot(
-    x,
-    u_act_updated,
-    label="Updated u_act (after correction)",
-    linestyle="-",
-    linewidth=2,
-)
+    # Initial memory
+    ax.plot(
+        x[bucket_idx],
+        u_act_initial[bucket_idx],
+        linestyle="--",
+        linewidth=2,
+        color=color,
+    )
+
+    # Updated memory
+    ax.plot(
+        x[bucket_idx],
+        u_act_updated[bucket_idx],
+        linestyle="-",
+        linewidth=2,
+        color=color,
+    )
 
 ax.set_xlabel("x")
 ax.set_ylabel("Activity")
 ax.set_title("Action memory: before vs after correction")
-ax.legend()
+
+# Custom legend
+from matplotlib.lines import Line2D
+legend_elements = [
+    Line2D([0], [0], color=c, lw=2, label=f"Action {i+1}")
+    for i, c in enumerate(action_colors)
+]
+legend_elements += [
+    Line2D([0], [0], color="black", lw=2, linestyle="--", label="Before"),
+    Line2D([0], [0], color="black", lw=2, linestyle="-", label="After"),
+]
+
+ax.legend(handles=legend_elements, loc="upper right")
 ax.grid(True)
 
 plt.tight_layout()
 plt.show()
+
