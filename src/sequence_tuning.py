@@ -137,12 +137,13 @@ class MemoryEditor:
             self.action_centers
         )
 
-    def apply_feedback(self, u_act_initial, u_act_history, annotations):
+    def apply_feedback(self, u_act_memory, u_act_initial, u_act_history, theta_act, annotations):
         u_new = u_act_initial.copy()
+        memory = u_act_memory
 
         for ann in annotations:
             if ann.feedback == FeedbackType.LATE:
-                u_new = self._make_later(u_new, ann, u_act_history)
+                u_new = self._make_later(memory, u_new, ann, u_act_history, theta_act)
 
             elif ann.feedback == FeedbackType.EARLY:
                 u_new = self._make_earlier(u_new)
@@ -189,18 +190,25 @@ class MemoryEditor:
 
         return bounds
     
-    def _make_later_action(self, u, action_idx, factor=0.8):
+    def _make_later_action(self, memory, u, action_idx, theta_act, factor=0.25):
         """
-        LATE feedback → decrease amplitude of the selected action peak.
+        LATE feedback → locally decrease amplitude of active peak
+        inside the selected action bucket.
         """
         u_new = u.copy()
+        theta_act = 1.5
 
         idx = self.action_bounds[action_idx]
 
-        # Reduce amplitude locally
-        u_new[idx] *= factor
+        # Heaviside only inside the bucket
+        f = np.heaviside(memory[idx] - theta_act, 1.0)
+
+        # Amplitude modulation (DNF-style)
+        # u_new[idx] += u_new[idx] * f * (-factor)
+        u_new[idx] += f * (-factor)
 
         return u_new
+
 
 
 
@@ -209,11 +217,11 @@ class MemoryEditor:
     #     #  as above but in opposite direction
     #     return np.roll(u, 20)
 
-    def _make_later(self, u, ann, u_act_history):
+    def _make_later(self, memory, u, ann, u_act_history, theta_act):
         action_idx = self._action_index_from_time(
             ann.time_index, u_act_history
         )
-        return self._make_later_action(u, action_idx)
+        return self._make_later_action(memory, u, action_idx, theta_act)
 
 
 
@@ -285,6 +293,8 @@ try:
     u_sim = u_field_1.flatten() - h_d_initial + 1.5
     input_action_onset_2 = u_field_1.flatten()
     h_u_sim = -h_d_initial * np.ones(np.shape(x)) + 1.5
+
+    u_act_memory = u_field_1.copy()
 
 except FileNotFoundError:
     print("No previous sequence memory found, initializing with default values.")
@@ -471,8 +481,10 @@ if annotations:
 
     editor = MemoryEditor(x, input_positions)
     u_act_updated = editor.apply_feedback(
+        u_act_memory=u_act_memory,
         u_act_initial=u_act_initial,
         u_act_history=u_act_history,
+        theta_act=theta_act,
         annotations=annotations
     )
 
