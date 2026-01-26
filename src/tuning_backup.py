@@ -142,10 +142,11 @@ class MemoryEditor:
         memory = u_act_memory
 
         for ann in annotations:
-            if ann.feedback in (FeedbackType.LATE, FeedbackType.EARLY):
-                u_new = self._apply_timing_feedback(
-                    memory, u_new, ann, u_act_history, theta_act
-                )
+            if ann.feedback == FeedbackType.LATE:
+                u_new = self._make_later(memory, u_new, ann, u_act_history, theta_act)
+
+            elif ann.feedback == FeedbackType.EARLY:
+                u_new = self._make_earlier(u_new)
 
             elif ann.feedback == FeedbackType.SKIP:
                 u_new = self._remove_peak(
@@ -156,6 +157,15 @@ class MemoryEditor:
 
         return u_new
 
+    def _make_earlier(self, u):
+        # shift memory slightly left REMOVE SHIFTING
+        #  to make earlier: increase the peak
+        #  action's mask (TODO) x f(u_act) -> to increase only the right peak
+        #  BUT, how to know which action to edit????? - in annotation we have time step
+        # somehow map time intervals to space intervals???
+        # and how to decide which one to edit based on when user speaks. the current or past?
+
+        return np.roll(u, -20)
     
     def _action_index_from_time(self, time_index, u_act_history):
         """
@@ -180,57 +190,31 @@ class MemoryEditor:
 
         return bounds
     
-    def _modulate_action_amplitude(
-        self,
-        memory,
-        u,
-        action_idx,
-        theta_act,
-        factor,
-        sign,
-    ):
+    def _make_later_action(self, memory, u, action_idx, theta_act, factor=0.25):
         """
-        Generic peak-selective amplitude modulation
-        inside a selected action bucket.
-
-        sign = -1 → LATE
-        sign = +1 → EARLY
+        LATE feedback → locally decrease amplitude of active peak
+        inside the selected action bucket.
         """
         u_new = u.copy()
+
         idx = self.action_bounds[action_idx]
 
+        # Heaviside only inside the bucket
         f = np.heaviside(memory[idx] - theta_act, 1.0)
-        u_new[idx] += sign * factor * f
+
+        # Amplitude modulation (DNF-style)
+        # u_new[idx] += u_new[idx] * f * (-factor)
+        u_new[idx] += f * (-factor)
 
         return u_new
 
 
-    def _apply_timing_feedback(
-        self,
-        memory,
-        u,
-        ann,
-        u_act_history,
-        theta_act,
-        factor=0.25,
-    ):
+
+    def _make_later(self, memory, u, ann, u_act_history, theta_act):
         action_idx = self._action_index_from_time(
             ann.time_index, u_act_history
         )
-
-        sign = {
-            FeedbackType.LATE: -1,
-            FeedbackType.EARLY: +1,
-        }[ann.feedback]
-
-        return self._modulate_action_amplitude(
-            memory=memory,
-            u=u,
-            action_idx=action_idx,
-            theta_act=theta_act,
-            factor=factor,
-            sign=sign,
-        )
+        return self._make_later_action(memory, u, action_idx, theta_act)
 
 
 
@@ -471,7 +455,7 @@ for i in range(len(t)):
         annotation_buffer.add(
             Annotation(
                 time_index=i,
-                feedback=FeedbackType.EARLY
+                feedback=FeedbackType.LATE
             )
         )
 
