@@ -14,6 +14,9 @@ from matplotlib.animation import FFMpegWriter
 
 from utils import *
 
+from dataclasses import dataclass
+from typing import Optional
+
 
 # skip inputs
 # 6 actions
@@ -82,7 +85,7 @@ action_colors = [
 # ====================================
 
 from enum import Enum
-from dataclasses import dataclass
+# from dataclasses import dataclass
 
 
 class FeedbackType(Enum):
@@ -92,12 +95,14 @@ class FeedbackType(Enum):
     AFTER = "after"
     SKIP = "skip"
     ADD = "add"
+    SWAP = "swap"
 
 
 @dataclass
 class Annotation:
     time_index: int
     feedback: FeedbackType
+    target_action: Optional[int] = None
 
 
 class AnnotationBuffer:
@@ -159,6 +164,13 @@ class MemoryEditor:
             elif ann.feedback == FeedbackType.SKIP:
                 u_new = self._apply_skip(
                     memory=memory,
+                    u=u_new,
+                    ann=ann,
+                    u_act_history=u_act_history,
+                )
+
+            elif ann.feedback == FeedbackType.SWAP:
+                u_new = self._apply_swap(
                     u=u_new,
                     ann=ann,
                     u_act_history=u_act_history,
@@ -260,6 +272,32 @@ class MemoryEditor:
 
         #  peak suppression
         u_new[idx] = u_new[0]
+
+        return u_new
+    
+    def _apply_swap(self, u, ann, u_act_history):
+        action_idx_a = self._action_index_from_time(
+            ann.time_index, u_act_history
+        )
+        action_idx_b = ann.target_action
+
+        return self._swap_actions(u, action_idx_a, action_idx_b)
+
+
+    def _swap_actions(self, u, action_idx_a, action_idx_b):
+        """
+        Swap entire memory patterns between two action intervals.
+        """
+        u_new = u.copy()
+
+        idx_a = self.action_bounds[action_idx_a]
+        idx_b = self.action_bounds[action_idx_b]
+
+        # Temporary copy to avoid overwrite
+        tmp = u_new[idx_a].copy()
+
+        u_new[idx_a] = u_new[idx_b]
+        u_new[idx_b] = tmp
 
         return u_new
 
@@ -503,12 +541,21 @@ for i in range(len(t)):
     #     # Later: replaced by ROS speech callback
 
 
+    # if i == 250:
+    #     annotation_buffer.add(
+    #         Annotation(
+    #             time_index=i,
+    #             feedback=FeedbackType.SKIP
+    #         )
+    #     )
+
     if i == 250:
         annotation_buffer.add(
-            Annotation(
-                time_index=i,
-                feedback=FeedbackType.SKIP
-            )
+        Annotation(
+            time_index=i,
+            feedback=FeedbackType.SWAP,
+            target_action=3,   # swap with this one
+        )
         )
 
 
