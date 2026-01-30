@@ -13,6 +13,58 @@ from typing import Optional
 from enum import Enum
 
 # ====================================
+# -------- Human feedback ------------
+# ====================================
+# NOTE: Must be defined BEFORE Annotation class!
+
+class FeedbackType(Enum):
+    EARLY = "early"
+    LATE = "late"
+    BEFORE = "before"
+    AFTER = "after"
+    SKIP = "skip"
+    ADD = "add"
+    SWAP = "swap"
+
+
+class ActionSelectionMode(Enum):
+    """How to determine which action to modify."""
+    TIME_BASED = "time"      # Infer from when feedback occurred
+    NAME_BASED = "name"      # User specifies action name
+    AUTO = "auto"            # Try name first, fall back to time
+
+
+@dataclass
+class Annotation:
+    """
+    Flexible feedback annotation.
+    
+    Supports multiple ways to specify which action:
+    - time_index: auto-detect from neural activity at that time
+    - action_name: user explicitly names the action
+    - action_index: directly specify the bucket index (advanced use)
+    """
+    feedback: FeedbackType
+    time_index: Optional[int] = None
+    action_name: Optional[str] = None
+    action_index: Optional[int] = None  # Direct index specification
+    target_action: Optional[int] = None  # For SWAP (numeric)
+    target_action_name: Optional[str] = None  # For SWAP (by name)
+
+
+class AnnotationBuffer:
+    """Passive buffer: stores human feedback during execution."""
+    def __init__(self):
+        self.annotations = []
+
+    def add(self, annotation: Annotation):
+        self.annotations.append(annotation)
+
+    def get_all(self):
+        return self.annotations
+
+
+# ====================================
 # -------- Initialization ------------
 # ====================================
 
@@ -38,95 +90,216 @@ def compute_action_bounds(x, positions):
 action_buckets = compute_action_bounds(x, input_positions)
 action_colors = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple"]
 
-# ====================================
-# -------- Human feedback ------------
-# ====================================
-
-class FeedbackType(Enum):
-    EARLY = "early"
-    LATE = "late"
-    BEFORE = "before"
-    AFTER = "after"
-    SKIP = "skip"
-    ADD = "add"
-    SWAP = "swap"
-
-@dataclass
-class Annotation:
-    time_index: int
-    feedback: FeedbackType
-    target_action: Optional[int] = None
-
-class AnnotationBuffer:
-    """Passive buffer: stores human feedback during execution."""
-    def __init__(self):
-        self.annotations = []
-
-    def add(self, annotation: Annotation):
-        self.annotations.append(annotation)
-
-    def get_all(self):
-        return self.annotations
 
 # ====================================
 # -------- Memory editor -------------
 # ====================================
 
 class MemoryEditor:
-    """Applies human feedback AFTER the run to modify initial u_act memory."""
+    """Applies human feedback to modify initial u_act memory."""
 
-    def __init__(self, x, action_centers):
+    def __init__(self, x, action_centers, action_names=None, 
+                 default_mode=ActionSelectionMode.AUTO):
+        """
+        Initialize memory editor.
+        
+        Args:
+            x: Spatial array
+            action_centers: List of action center positions
+            action_names: List of human-readable action names (optional)
+            default_mode: Default action selection strategy
+        """
         self.x = x
         self.action_centers = np.array(action_centers)
         self.action_bounds = compute_action_bounds(x, action_centers)
-
-    def apply_feedback(self, u_act_memory, u_act_initial, u_act_history, theta_act, annotations):
+        self.default_mode = default_mode
+        
+        # Create action name mappings
+        if action_names is None:
+            action_names = [f"action_{i}" for i in range(len(action_centers))]
+        
+        self.action_names = action_names
+        self.name_to_index = {name.lower(): i for i, name in enumerate(action_names)}
+        self.index_to_name = {i: name for i, name in enumerate(action_names)}
+        
+        print(f"[MemoryEditor] Initialized with mode: {default_mode.value}")
+        print(f"[MemoryEditor] Actions: {', '.join(action_names)}")
+    
+    def set_mode(self, mode):
+        """Change the default action selection mode."""
+        if isinstance(mode, str):
+            mode = ActionSelectionMode(mode)
+        self.default_mode = mode
+        print(f"[MemoryEditor] Mode changed to: {mode.value}")
+    
+    def resolve_action_index(self, ann, u_act_history, mode=None):
+        """
+        Determine which action bucket to modify.
+        
+        Priority order (can be controlled by mode):
+        1. action_index (if explicitly provided)
+        2. action_name (if provided and mode allows)
+        3. time_index (if provided and mode allows)
+        
+        Args:
+            ann: Annotation object
+            u_act_history: History of action activations
+            mode: Override default mode for this annotation
+        
+        Returns:
+            tuple: (action_index, action_name, method_used)
+        """
+        if mode is None:
+            mode = self.default_mode
+        
+        # 1. Direct index specification (highest priority)
+        if ann.action_index is not None:
+            action_name = self.index_to_name[ann.action_index]
+            return ann.action_index, action_name, "direct_index"
+        
+        # 2. Name-based selection
+        if ann.action_name is not None:
+            if mode in (ActionSelectionMode.NAME_BASED, ActionSelectionMode.AUTO):
+                action_idx = self.get_action_index_from_name(ann.action_name)
+                return action_idx, ann.action_name, "name"
+            elif mode == ActionSelectionMode.TIME_BASED:
+                print(f"[WARNING] Mode is TIME_BASED but action_name provided. "
+                      f"Ignoring name '{ann.action_name}'")
+        
+        # 3. Time-based selection
+        if ann.time_index is not None:
+            if mode in (ActionSelectionMode.TIME_BASED, ActionSelectionMode.AUTO):
+                action_idx = self._action_index_from_time(ann.time_index, u_act_history)
+                action_name = self.index_to_name[action_idx]
+                return action_idx, action_name, "time"
+            elif mode == ActionSelectionMode.NAME_BASED:
+                raise ValueError(
+                    "Mode is NAME_BASED but only time_index provided. "
+                    "Please provide action_name."
+                )
+        
+        # If we get here, insufficient information
+        raise ValueError(
+            f"Cannot determine action index. Annotation has:\n"
+            f"  action_index: {ann.action_index}\n"
+            f"  action_name: {ann.action_name}\n"
+            f"  time_index: {ann.time_index}\n"
+            f"At least one must be provided."
+        )
+    
+    def resolve_target_action_index(self, ann, mode=None):
+        """
+        Resolve target action for SWAP operations.
+        Similar to resolve_action_index but for swap targets.
+        """
+        if mode is None:
+            mode = self.default_mode
+        
+        # Direct index
+        if ann.target_action is not None:
+            return ann.target_action, self.index_to_name[ann.target_action]
+        
+        # By name
+        if ann.target_action_name is not None:
+            target_idx = self.get_action_index_from_name(ann.target_action_name)
+            return target_idx, ann.target_action_name
+        
+        raise ValueError("SWAP feedback requires target_action or target_action_name")
+    
+    def apply_feedback(self, u_act_memory, u_act_initial, u_act_history, 
+                      theta_act, annotations, mode=None):
+        """
+        Apply feedback annotations with flexible action selection.
+        
+        Args:
+            u_act_memory: Memory field (for computing modulations)
+            u_act_initial: Initial activation to modify
+            u_act_history: Time series of activations
+            theta_act: Threshold for action detection
+            annotations: List of Annotation objects
+            mode: Override default mode for all annotations (optional)
+        
+        Returns:
+            Modified activation field
+        """
         u_new = u_act_initial.copy()
 
-        for ann in annotations:
-            print("[DEBUG] ann.feedback =", ann.feedback)
-
+        for i, ann in enumerate(annotations):
+            print(f"\n[{i+1}/{len(annotations)}] Processing {ann.feedback.value} feedback")
+            
+            # Resolve which action to modify
+            action_idx, action_name, method = self.resolve_action_index(
+                ann, u_act_history, mode
+            )
+            print(f"  → Action: '{action_name}' (index {action_idx}) via {method}")
+            
+            # Apply the appropriate feedback
             if ann.feedback in (FeedbackType.LATE, FeedbackType.EARLY):
-                u_new = self._apply_timing_feedback(u_act_memory, u_new, ann, u_act_history, theta_act)
+                u_new = self._apply_timing_feedback_direct(
+                    u_act_memory, u_new, action_idx, ann.feedback, theta_act
+                )
+            
             elif ann.feedback == FeedbackType.SKIP:
-                u_new = self._apply_skip(u_act_memory, u_new, ann, u_act_history)
+                u_new = self._apply_skip_direct(u_new, action_idx)
+            
             elif ann.feedback == FeedbackType.SWAP:
-                u_new = self._apply_swap(u_new, ann, u_act_history)
+                target_idx, target_name = self.resolve_target_action_index(ann, mode)
+                print(f"  → Target: '{target_name}' (index {target_idx})")
+                u_new = self._apply_swap_direct(u_new, action_idx, target_idx)
 
         return u_new
     
+    # ========================================
+    # Helper methods
+    # ========================================
+    
+    def get_action_index_from_name(self, action_name):
+        """Convert action name to action index."""
+        action_name_lower = action_name.lower().strip()
+        
+        if action_name_lower not in self.name_to_index:
+            available = ", ".join(self.action_names)
+            raise ValueError(
+                f"Unknown action '{action_name}'. "
+                f"Available actions: {available}"
+            )
+        
+        return self.name_to_index[action_name_lower]
+    
     def _action_index_from_time(self, time_index, u_act_history):
         """Return which action bucket was active at this time."""
-        return int(np.argmax(u_act_history[time_index]))
+        values = u_act_history[time_index]
+        action_idx = int(np.argmax(values))
+        return action_idx
+    
+    def _apply_timing_feedback_direct(self, memory, u, action_idx, feedback_type, 
+                                     theta_act, factor=0.25):
+        """Apply timing feedback to a specific action."""
+        sign = -1 if feedback_type == FeedbackType.LATE else 1
+        return self._modulate_action_amplitude(memory, u, action_idx, theta_act, factor, sign)
+    
+    def _apply_skip_direct(self, u, action_idx):
+        """Skip/remove an action."""
+        print(f"[DEBUG] Skipping action {action_idx}")
+        u_new = u.copy()
+        u_new[self.action_bounds[action_idx]] = u_new[0]
+        return u_new
+    
+    def _apply_swap_direct(self, u, action_idx_a, action_idx_b):
+        """Swap two actions."""
+        u_new = u.copy()
+        idx_a, idx_b = self.action_bounds[action_idx_a], self.action_bounds[action_idx_b]
+        u_new[idx_a], u_new[idx_b] = u_new[idx_b].copy(), u_new[idx_a].copy()
+        return u_new
     
     def _modulate_action_amplitude(self, memory, u, action_idx, theta_act, factor, sign):
-        """Generic peak-selective amplitude modulation inside a selected action bucket."""
+        """Generic peak-selective amplitude modulation."""
         u_new = u.copy()
         idx = self.action_bounds[action_idx]
         f = np.heaviside(memory[idx] - theta_act, 1.0)
         u_new[idx] += sign * factor * f
         return u_new
 
-    def _apply_timing_feedback(self, memory, u, ann, u_act_history, theta_act, factor=0.25):
-        action_idx = self._action_index_from_time(ann.time_index, u_act_history)
-        sign = -1 if ann.feedback == FeedbackType.LATE else 1
-        return self._modulate_action_amplitude(memory, u, action_idx, theta_act, factor, sign)
-    
-    def _apply_skip(self, memory, u, ann, u_act_history):
-        print("[DEBUG] ENTER _apply_skip")
-        action_idx = self._action_index_from_time(ann.time_index, u_act_history)
-        u_new = u.copy()
-        u_new[self.action_bounds[action_idx]] = u_new[0]
-        return u_new
-    
-    def _apply_swap(self, u, ann, u_act_history):
-        action_idx_a = self._action_index_from_time(ann.time_index, u_act_history)
-        action_idx_b = ann.target_action
-        
-        u_new = u.copy()
-        idx_a, idx_b = self.action_bounds[action_idx_a], self.action_bounds[action_idx_b]
-        u_new[idx_a], u_new[idx_b] = u_new[idx_b].copy(), u_new[idx_a].copy()
-        return u_new
 
 # ====================================
 # -------- Project paths -------------
@@ -283,19 +456,30 @@ for i in range(len(t)):
         axs[1].set_title(f"Field u_wm - Time = {i}")
         plt.pause(plot_delay)
 
+    # ====================================
     # Passive feedback collection
+    # ====================================
+    # CHOOSE ONE OF THE FOLLOWING EXAMPLES:
+    
+    # Example 1: Time-based (original)
     # if i == 250:
     #     annotation_buffer.add(
-    #         Annotation(time_index=i, feedback=FeedbackType.SWAP, target_action=3)
+    #         Annotation(
+    #             feedback=FeedbackType.SWAP,
+    #             time_index=i,
+    #             target_action=3
+    #         )
     #     )
+    
+    # Example 2: Name-based
     if i == 250:
         annotation_buffer.add(
             Annotation(
-                time_index=i,
-                feedback=FeedbackType.LATE
+                feedback=FeedbackType.SKIP,
+                action_name="reach",  # ✅ This is index 1
+                target_action_name="transport"  # ✅ This is index 3
             )
         )
-
 # ====================================
 # -------- Post-run learning ---------
 # ====================================
@@ -303,12 +487,19 @@ for i in range(len(t)):
 annotations = annotation_buffer.get_all()
 
 if annotations:
-    print(f"Applying {len(annotations)} feedback annotations")
+    print(f"\nApplying {len(annotations)} feedback annotations")
 
-    editor = MemoryEditor(x, input_positions)
-    print("Memory peak per action:")
+    # Initialize editor with action names and mode
+    editor = MemoryEditor(
+        x, 
+        input_positions,
+        action_names=["reach", "grasp", "lift", "transport", "place"],
+        default_mode=ActionSelectionMode.AUTO  # Can switch to TIME_BASED or NAME_BASED
+    )
+    
+    print("\nMemory peak per action:")
     for k, idx in enumerate(editor.action_bounds):
-        print(k, np.max(u_act_memory[idx]))
+        print(f"  {editor.action_names[k]}: {np.max(u_act_memory[idx]):.3f}")
 
     u_act_updated = editor.apply_feedback(
         u_act_memory=u_act_memory,
@@ -321,14 +512,14 @@ if annotations:
     print("\n[DEBUG] Action peak changes (Δ):")
     for k, idx in enumerate(editor.action_bounds):
         delta = np.max(u_act_updated[idx]) - np.max(u_act_initial[idx])
-        print(f"Action {k}: Δpeak = {delta:.3f}")
+        print(f"  {editor.action_names[k]}: Δpeak = {delta:.3f}")
 
     # Save updated memory for next run
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     memory_path = results_dir / f"u_act_memory_updated_{timestamp}.npy"
     np.save(memory_path, u_act_updated)
 
-    print(f"Updated memory saved to: {memory_path}")
+    print(f"\nUpdated memory saved to: {memory_path}")
 else:
     print("No feedback annotations collected")
 
@@ -348,7 +539,7 @@ ax.set_ylabel("Activity")
 ax.set_title("Action memory: before vs after correction")
 
 # Custom legend
-legend_elements = [Line2D([0], [0], color=c, lw=2, label=f"Action {i+1}") 
+legend_elements = [Line2D([0], [0], color=c, lw=2, label=f"{editor.action_names[i]}") 
                    for i, c in enumerate(action_colors)]
 legend_elements += [
     Line2D([0], [0], color="black", lw=2, linestyle="--", label="Before"),
