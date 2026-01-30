@@ -14,6 +14,9 @@ from matplotlib.animation import FFMpegWriter
 
 from utils import *
 
+from dataclasses import dataclass
+from typing import Optional
+
 
 # skip inputs
 # 6 actions
@@ -82,7 +85,7 @@ action_colors = [
 # ====================================
 
 from enum import Enum
-from dataclasses import dataclass
+# from dataclasses import dataclass
 
 
 class FeedbackType(Enum):
@@ -92,12 +95,14 @@ class FeedbackType(Enum):
     AFTER = "after"
     SKIP = "skip"
     ADD = "add"
+    SWAP = "swap"
 
 
 @dataclass
 class Annotation:
     time_index: int
     feedback: FeedbackType
+    target_action: Optional[int] = None
 
 
 class AnnotationBuffer:
@@ -137,35 +142,43 @@ class MemoryEditor:
             self.action_centers
         )
 
-    def apply_feedback(self, u_act_memory, u_act_initial, u_act_history, theta_act, annotations):
+    def apply_feedback(
+        self,
+        u_act_memory,
+        u_act_initial,
+        u_act_history,
+        theta_act,
+        annotations,
+    ):
         u_new = u_act_initial.copy()
         memory = u_act_memory
 
         for ann in annotations:
-            if ann.feedback == FeedbackType.LATE:
-                u_new = self._make_later(memory, u_new, ann, u_act_history, theta_act)
+            print("[DEBUG] ann.feedback =", ann.feedback)
 
-            elif ann.feedback == FeedbackType.EARLY:
-                u_new = self._make_earlier(u_new)
+            if ann.feedback in (FeedbackType.LATE, FeedbackType.EARLY):
+                u_new = self._apply_timing_feedback(
+                    memory, u_new, ann, u_act_history, theta_act
+                )
 
             elif ann.feedback == FeedbackType.SKIP:
-                u_new = self._remove_peak(
-                    u_new,
-                    ann.time_index,
-                    u_act_history
+                u_new = self._apply_skip(
+                    memory=memory,
+                    u=u_new,
+                    ann=ann,
+                    u_act_history=u_act_history,
+                )
+
+            elif ann.feedback == FeedbackType.SWAP:
+                u_new = self._apply_swap(
+                    u=u_new,
+                    ann=ann,
+                    u_act_history=u_act_history,
                 )
 
         return u_new
 
-    def _make_earlier(self, u):
-        # shift memory slightly left REMOVE SHIFTING
-        #  to make earlier: increase the peak
-        #  action's mask (TODO) x f(u_act) -> to increase only the right peak
-        #  BUT, how to know which action to edit????? - in annotation we have time step
-        # somehow map time intervals to space intervals???
-        # and how to decide which one to edit based on when user speaks. the current or past?
 
-        return np.roll(u, -20)
     
     def _action_index_from_time(self, time_index, u_act_history):
         """
@@ -190,40 +203,107 @@ class MemoryEditor:
 
         return bounds
     
-    def _make_later_action(self, memory, u, action_idx, theta_act, factor=0.25):
+    def _modulate_action_amplitude(
+        self,
+        memory,
+        u,
+        action_idx,
+        theta_act,
+        factor,
+        sign,
+    ):
         """
-        LATE feedback → locally decrease amplitude of active peak
-        inside the selected action bucket.
+        Generic peak-selective amplitude modulation
+        inside a selected action bucket.
+
+        sign = -1 → LATE
+        sign = +1 → EARLY
+        """
+        u_new = u.copy()
+        idx = self.action_bounds[action_idx]
+
+        f = np.heaviside(memory[idx] - theta_act, 1.0)
+        u_new[idx] += sign * factor * f
+
+        return u_new
+
+
+    def _apply_timing_feedback(
+        self,
+        memory,
+        u,
+        ann,
+        u_act_history,
+        theta_act,
+        factor=0.25,
+    ):
+        action_idx = self._action_index_from_time(
+            ann.time_index, u_act_history
+        )
+
+        sign = {
+            FeedbackType.LATE: -1,
+            FeedbackType.EARLY: +1,
+        }[ann.feedback]
+
+        return self._modulate_action_amplitude(
+            memory=memory,
+            u=u,
+            action_idx=action_idx,
+            theta_act=theta_act,
+            factor=factor,
+            sign=sign,
+        )
+    
+    def _apply_skip(
+        self,
+        memory,
+        u,
+        ann,
+        u_act_history,
+    ):
+        print("[DEBUG] ENTER _apply_skip")
+        action_idx = self._action_index_from_time(
+            ann.time_index, u_act_history
+        )
+
+        u_new = u.copy()
+        idx = self.action_bounds[action_idx]
+
+        #  peak suppression
+        u_new[idx] = u_new[0]
+
+        return u_new
+    
+    def _apply_swap(self, u, ann, u_act_history):
+        action_idx_a = self._action_index_from_time(
+            ann.time_index, u_act_history
+        )
+        action_idx_b = ann.target_action
+
+        return self._swap_actions(u, action_idx_a, action_idx_b)
+
+
+    def _swap_actions(self, u, action_idx_a, action_idx_b):
+        """
+        Swap entire memory patterns between two action intervals.
         """
         u_new = u.copy()
 
-        idx = self.action_bounds[action_idx]
+        idx_a = self.action_bounds[action_idx_a]
+        idx_b = self.action_bounds[action_idx_b]
 
-        # Heaviside only inside the bucket
-        f = np.heaviside(memory[idx] - theta_act, 1.0)
+        # Temporary copy to avoid overwrite
+        tmp = u_new[idx_a].copy()
 
-        # Amplitude modulation (DNF-style)
-        # u_new[idx] += u_new[idx] * f * (-factor)
-        u_new[idx] += f * (-factor)
+        u_new[idx_a] = u_new[idx_b]
+        u_new[idx_b] = tmp
 
         return u_new
 
 
 
-    def _make_later(self, memory, u, ann, u_act_history, theta_act):
-        action_idx = self._action_index_from_time(
-            ann.time_index, u_act_history
-        )
-        return self._make_later_action(memory, u, action_idx, theta_act)
 
-
-
-    def _remove_peak(self, u, t_idx, history):
-        # remove peak active at annotated time
-        snapshot = history[t_idx]
-        peak_pos = np.argmax(snapshot)
-        u[peak_pos - 3 : peak_pos + 3] = -5.0
-        return u
 
 
 # TODO: edit actions!!!!!!
@@ -450,14 +530,34 @@ for i in range(len(t)):
     # ------------------------------------
     # Passive feedback collection (FAKE)
     # ------------------------------------
-    # Later: replaced by ROS speech callback
+    # # Later: replaced by ROS speech callback
+    # if i == 250:
+    #     annotation_buffer.add(
+    #         Annotation(
+    #             time_index=i,
+    #             feedback=FeedbackType.EARLY
+    #         )
+    #     )
+    #     # Later: replaced by ROS speech callback
+
+
+    # if i == 250:
+    #     annotation_buffer.add(
+    #         Annotation(
+    #             time_index=i,
+    #             feedback=FeedbackType.SKIP
+    #         )
+    #     )
+
     if i == 250:
         annotation_buffer.add(
-            Annotation(
-                time_index=i,
-                feedback=FeedbackType.LATE
-            )
+        Annotation(
+            time_index=i,
+            feedback=FeedbackType.SWAP,
+            target_action=3,   # swap with this one
         )
+        )
+
 
 
 
@@ -467,12 +567,18 @@ for i in range(len(t)):
 # -------- Post-run learning ---------
 # ====================================
 
+
 annotations = annotation_buffer.get_all()
 
 if annotations:
     print(f"Applying {len(annotations)} feedback annotations")
 
     editor = MemoryEditor(x, input_positions)
+    print("Memory peak per action:")
+    for k, idx in enumerate(editor.action_bounds):
+        print(k, np.max(u_act_memory[idx]))
+
+
     u_act_updated = editor.apply_feedback(
         u_act_memory=u_act_memory,
         u_act_initial=u_act_initial,
@@ -480,6 +586,12 @@ if annotations:
         theta_act=theta_act,
         annotations=annotations
     )
+
+    print("\n[DEBUG] Action peak changes (Δ):")
+    for k, idx in enumerate(editor.action_bounds):
+        delta = np.max(u_act_updated[idx]) - np.max(u_act_initial[idx])
+        print(f"Action {k}: Δpeak = {delta:.3f}")
+
 
     # Save updated memory for next run
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
