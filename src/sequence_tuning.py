@@ -15,7 +15,6 @@ from enum import Enum
 # ====================================
 # -------- Human feedback ------------
 # ====================================
-# NOTE: Must be defined BEFORE Annotation class!
 
 class FeedbackType(Enum):
     EARLY = "early"
@@ -25,31 +24,25 @@ class FeedbackType(Enum):
     SKIP = "skip"
     ADD = "add"
     SWAP = "swap"
+    LOCK = "lock"  # NEW: Lock an action to prevent modifications
 
 
 class ActionSelectionMode(Enum):
     """How to determine which action to modify."""
-    TIME_BASED = "time"      # Infer from when feedback occurred
-    NAME_BASED = "name"      # User specifies action name
-    AUTO = "auto"            # Try name first, fall back to time
+    TIME_BASED = "time"
+    NAME_BASED = "name"
+    AUTO = "auto"
 
 
 @dataclass
 class Annotation:
-    """
-    Flexible feedback annotation.
-    
-    Supports multiple ways to specify which action:
-    - time_index: auto-detect from neural activity at that time
-    - action_name: user explicitly names the action
-    - action_index: directly specify the bucket index (advanced use)
-    """
+    """Flexible feedback annotation."""
     feedback: FeedbackType
     time_index: Optional[int] = None
     action_name: Optional[str] = None
-    action_index: Optional[int] = None  # Direct index specification
-    target_action: Optional[int] = None  # For SWAP (numeric)
-    target_action_name: Optional[str] = None  # For SWAP (by name)
+    action_index: Optional[int] = None
+    target_action: Optional[int] = None
+    target_action_name: Optional[str] = None
 
 
 class AnnotationBuffer:
@@ -100,15 +93,7 @@ class MemoryEditor:
 
     def __init__(self, x, action_centers, action_names=None, 
                  default_mode=ActionSelectionMode.AUTO):
-        """
-        Initialize memory editor.
-        
-        Args:
-            x: Spatial array
-            action_centers: List of action center positions
-            action_names: List of human-readable action names (optional)
-            default_mode: Default action selection strategy
-        """
+        """Initialize memory editor."""
         self.x = x
         self.action_centers = np.array(action_centers)
         self.action_bounds = compute_action_bounds(x, action_centers)
@@ -122,6 +107,9 @@ class MemoryEditor:
         self.name_to_index = {name.lower(): i for i, name in enumerate(action_names)}
         self.index_to_name = {i: name for i, name in enumerate(action_names)}
         
+        # Initialize the lock mask (1 everywhere = unlocked)
+        self.h_amem_mask = np.ones(len(x))
+        
         print(f"[MemoryEditor] Initialized with mode: {default_mode.value}")
         print(f"[MemoryEditor] Actions: {', '.join(action_names)}")
     
@@ -133,26 +121,11 @@ class MemoryEditor:
         print(f"[MemoryEditor] Mode changed to: {mode.value}")
     
     def resolve_action_index(self, ann, u_act_history, mode=None):
-        """
-        Determine which action bucket to modify.
-        
-        Priority order (can be controlled by mode):
-        1. action_index (if explicitly provided)
-        2. action_name (if provided and mode allows)
-        3. time_index (if provided and mode allows)
-        
-        Args:
-            ann: Annotation object
-            u_act_history: History of action activations
-            mode: Override default mode for this annotation
-        
-        Returns:
-            tuple: (action_index, action_name, method_used)
-        """
+        """Determine which action bucket to modify."""
         if mode is None:
             mode = self.default_mode
         
-        # 1. Direct index specification (highest priority)
+        # 1. Direct index specification
         if ann.action_index is not None:
             action_name = self.index_to_name[ann.action_index]
             return ann.action_index, action_name, "direct_index"
@@ -178,7 +151,7 @@ class MemoryEditor:
                     "Please provide action_name."
                 )
         
-        # If we get here, insufficient information
+        # Insufficient information
         raise ValueError(
             f"Cannot determine action index. Annotation has:\n"
             f"  action_index: {ann.action_index}\n"
@@ -188,18 +161,13 @@ class MemoryEditor:
         )
     
     def resolve_target_action_index(self, ann, mode=None):
-        """
-        Resolve target action for SWAP operations.
-        Similar to resolve_action_index but for swap targets.
-        """
+        """Resolve target action for SWAP operations."""
         if mode is None:
             mode = self.default_mode
         
-        # Direct index
         if ann.target_action is not None:
             return ann.target_action, self.index_to_name[ann.target_action]
         
-        # By name
         if ann.target_action_name is not None:
             target_idx = self.get_action_index_from_name(ann.target_action_name)
             return target_idx, ann.target_action_name
@@ -208,20 +176,7 @@ class MemoryEditor:
     
     def apply_feedback(self, u_act_memory, u_act_initial, u_act_history, 
                       theta_act, annotations, mode=None):
-        """
-        Apply feedback annotations with flexible action selection.
-        
-        Args:
-            u_act_memory: Memory field (for computing modulations)
-            u_act_initial: Initial activation to modify
-            u_act_history: Time series of activations
-            theta_act: Threshold for action detection
-            annotations: List of Annotation objects
-            mode: Override default mode for all annotations (optional)
-        
-        Returns:
-            Modified activation field
-        """
+        """Apply feedback annotations with flexible action selection."""
         u_new = u_act_initial.copy()
 
         for i, ann in enumerate(annotations):
@@ -246,8 +201,15 @@ class MemoryEditor:
                 target_idx, target_name = self.resolve_target_action_index(ann, mode)
                 print(f"  → Target: '{target_name}' (index {target_idx})")
                 u_new = self._apply_swap_direct(u_new, action_idx, target_idx)
+            
+            elif ann.feedback == FeedbackType.LOCK:
+                self._apply_lock(action_idx)
 
         return u_new
+    
+    def get_lock_mask(self):
+        """Return the current lock mask."""
+        return self.h_amem_mask.copy()
     
     # ========================================
     # Helper methods
@@ -291,6 +253,13 @@ class MemoryEditor:
         idx_a, idx_b = self.action_bounds[action_idx_a], self.action_bounds[action_idx_b]
         u_new[idx_a], u_new[idx_b] = u_new[idx_b].copy(), u_new[idx_a].copy()
         return u_new
+    
+    def _apply_lock(self, action_idx):
+        """Lock an action by setting mask to 0 in that region."""
+        print(f"[DEBUG] Locking action {action_idx}")
+        idx = self.action_bounds[action_idx]
+        self.h_amem_mask[idx] = 0.0
+        print(f"  → Mask set to 0 for {len(idx)} spatial points")
     
     def _modulate_action_amplitude(self, memory, u, action_idx, theta_act, factor, sign):
         """Generic peak-selective amplitude modulation."""
@@ -457,29 +426,28 @@ for i in range(len(t)):
         plt.pause(plot_delay)
 
     # ====================================
-    # Passive feedback collection
+    # Passive feedback collection - EXAMPLES
     # ====================================
-    # CHOOSE ONE OF THE FOLLOWING EXAMPLES:
     
-    # Example 1: Time-based (original)
+    # Example: SWAP feedback
     # if i == 250:
     #     annotation_buffer.add(
     #         Annotation(
     #             feedback=FeedbackType.SWAP,
-    #             time_index=i,
-    #             target_action=3
+    #             action_name="grasp",
+    #             target_action_name="transport"
     #         )
     #     )
     
-    # Example 2: Name-based
+    # Example: LOCK feedback
     if i == 250:
         annotation_buffer.add(
             Annotation(
-                feedback=FeedbackType.SKIP,
-                action_name="reach",  # ✅ This is index 1
-                target_action_name="transport"  # ✅ This is index 3
+                feedback=FeedbackType.LOCK,
+                action_name="grasp"  # Lock the lift action
             )
         )
+
 # ====================================
 # -------- Post-run learning ---------
 # ====================================
@@ -494,7 +462,7 @@ if annotations:
         x, 
         input_positions,
         action_names=["reach", "grasp", "lift", "transport", "place"],
-        default_mode=ActionSelectionMode.AUTO  # Can switch to TIME_BASED or NAME_BASED
+        default_mode=ActionSelectionMode.AUTO
     )
     
     print("\nMemory peak per action:")
@@ -514,39 +482,70 @@ if annotations:
         delta = np.max(u_act_updated[idx]) - np.max(u_act_initial[idx])
         print(f"  {editor.action_names[k]}: Δpeak = {delta:.3f}")
 
-    # Save updated memory for next run
+    # Get the lock mask
+    h_amem_mask = editor.get_lock_mask()
+
+    # Save updated memory and mask
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     memory_path = results_dir / f"u_act_memory_updated_{timestamp}.npy"
+    mask_path = results_dir / f"h_amem_mask_{timestamp}.npy"
+    
     np.save(memory_path, u_act_updated)
+    np.save(mask_path, h_amem_mask)
 
     print(f"\nUpdated memory saved to: {memory_path}")
+    print(f"Lock mask saved to: {mask_path}")
+    
+    # Print lock mask summary
+    locked_regions = np.sum(h_amem_mask == 0)
+    total_points = len(h_amem_mask)
+    print(f"\nLock mask summary:")
+    print(f"  Locked points: {locked_regions}/{total_points} ({100*locked_regions/total_points:.1f}%)")
+    print(f"  Unlocked points: {total_points - locked_regions}/{total_points} ({100*(total_points-locked_regions)/total_points:.1f}%)")
+    
 else:
     print("No feedback annotations collected")
+    h_amem_mask = np.ones(len(x))  # Default: everything unlocked
 
 # ====================================
 # -------- Memory comparison plot ----
 # ====================================
 
 plt.ioff()
-fig, ax = plt.subplots(figsize=(10, 4))
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
 
+# Top plot: Memory before/after
 for bucket_idx, color in zip(action_buckets, action_colors):
-    ax.plot(x[bucket_idx], u_act_initial[bucket_idx], linestyle="--", linewidth=2, color=color)
-    ax.plot(x[bucket_idx], u_act_updated[bucket_idx], linestyle="-", linewidth=2, color=color)
+    ax1.plot(x[bucket_idx], u_act_initial[bucket_idx], linestyle="--", linewidth=2, color=color)
+    ax1.plot(x[bucket_idx], u_act_updated[bucket_idx], linestyle="-", linewidth=2, color=color)
 
-ax.set_xlabel("x")
-ax.set_ylabel("Activity")
-ax.set_title("Action memory: before vs after correction")
+ax1.set_ylabel("Activity")
+ax1.set_title("Action memory: before vs after correction")
 
-# Custom legend
+# Custom legend for top plot
 legend_elements = [Line2D([0], [0], color=c, lw=2, label=f"{editor.action_names[i]}") 
                    for i, c in enumerate(action_colors)]
 legend_elements += [
     Line2D([0], [0], color="black", lw=2, linestyle="--", label="Before"),
     Line2D([0], [0], color="black", lw=2, linestyle="-", label="After"),
 ]
+ax1.legend(handles=legend_elements, loc="upper right")
+ax1.grid(True)
 
-ax.legend(handles=legend_elements, loc="upper right")
-ax.grid(True)
+# Bottom plot: Lock mask
+ax2.fill_between(x, 0, h_amem_mask, alpha=0.3, color='gray', label='Unlocked (1)')
+ax2.fill_between(x, 0, 1-h_amem_mask, alpha=0.5, color='red', label='Locked (0)')
+ax2.set_ylim(-0.1, 1.1)
+ax2.set_xlabel("x")
+ax2.set_ylabel("Mask value")
+ax2.set_title("Lock mask (h_amem_mask)")
+ax2.legend(loc="upper right")
+ax2.grid(True)
+
+# Add vertical lines to show action boundaries
+for i, pos in enumerate(input_positions):
+    ax1.axvline(pos, color='gray', linestyle=':', alpha=0.3)
+    ax2.axvline(pos, color='gray', linestyle=':', alpha=0.3)
+
 plt.tight_layout()
 plt.show()
