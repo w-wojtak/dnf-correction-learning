@@ -540,7 +540,7 @@ skip_params = FeedbackFieldParams(
 
 lock_params = FeedbackFieldParams(
     kernel_type="gauss",
-    kernel_pars=[2.0, 0.8, 0.05],
+    kernel_pars=[1.5, 0.75, 0.05],
     h_0=-1.0,
     theta=0.5,
     tau=1.0,
@@ -561,8 +561,20 @@ lock_history = []
 # ====================================
 
 # todo: inputs for tuning ????
-# action name + what ???
-# action name + object ?? from vision 
+# action name + what ??? we need action and input_position.....
+# action name + object ?? from vision ???? 
+# better than from time step, because it would need to be when the action is executed??
+# but then why do we run u_act and u_wm ??
+# BUT objects are in robot's hands during execution....
+# both?? or sth else ? 
+# or just correct at the end??
+# but then user might already forget
+# OR different ways depending on the action ???
+# to justify running u_act and u_wm....
+# so how to correct during the run but affect u_amem only at the end?????
+# 
+
+
 
 for i in range(len(t)):
     # ── main fields ──────────────────────────────────────────────────
